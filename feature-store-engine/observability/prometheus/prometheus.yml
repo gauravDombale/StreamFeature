@@ -1,0 +1,57 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: featurestore-local
+    env: development
+
+rule_files:
+  - "alerting_rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+scrape_configs:
+  # ── gRPC API Server ─────────────────────────────────────────────
+  - job_name: api-server
+    static_configs:
+      - targets: ["host.docker.internal:2112"]
+    metrics_path: /metrics
+    scrape_interval: 5s
+
+  # ── Kafka (JMX Exporter) ────────────────────────────────────────
+  - job_name: kafka
+    static_configs:
+      - targets:
+          - "kafka-1:9101"
+          - "kafka-2:9101"
+          - "kafka-3:9101"
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # ── Redis (redis_exporter) ──────────────────────────────────────
+  - job_name: redis
+    static_configs:
+      - targets:
+          - "redis-node-1:9121"
+          - "redis-node-2:9121"
+          - "redis-node-3:9121"
+
+  # ── Flink (REST API scraper) ────────────────────────────────────
+  - job_name: flink
+    static_configs:
+      - targets: ["flink-jobmanager:8081"]
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # ── PostgreSQL ──────────────────────────────────────────────────
+  - job_name: postgres
+    static_configs:
+      - targets: ["featurestore-postgres:5432"]
+
+  # ── Prometheus Self-Monitoring ──────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

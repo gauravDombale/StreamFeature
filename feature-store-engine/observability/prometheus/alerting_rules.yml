@@ -1,0 +1,99 @@
+groups:
+  - name: featurestore.serving
+    interval: 15s
+    rules:
+      # ── Serving Latency ────────────────────────────────────────
+      - alert: ServingP99HighLatency
+        expr: histogram_quantile(0.99, rate(featurestore_serving_latency_seconds_bucket[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+          team: ml-platform
+        annotations:
+          summary: "Feature serving p99 latency > 50ms"
+          description: "p99 latency is {{ $value | humanizeDuration }}. SLA is 10ms."
+
+      - alert: ServingP99CriticalLatency
+        expr: histogram_quantile(0.99, rate(featurestore_serving_latency_seconds_bucket[5m])) > 0.1
+        for: 1m
+        labels:
+          severity: critical
+          team: ml-platform
+        annotations:
+          summary: "Feature serving p99 latency > 100ms – CRITICAL"
+          description: "p99 latency is {{ $value | humanizeDuration }}."
+
+      # ── Error Rate ─────────────────────────────────────────────
+      - alert: HighErrorRate
+        expr: |
+          rate(featurestore_serving_requests_total{status="error"}[5m]) /
+          rate(featurestore_serving_requests_total[5m]) > 0.001
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Feature serving error rate > 0.1%"
+          description: "Error rate: {{ $value | humanizePercentage }}"
+
+  - name: featurestore.freshness
+    interval: 30s
+    rules:
+      - alert: FeatureStaleData
+        expr: featurestore_feature_freshness_seconds > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Feature {{ $labels.feature_name }} is stale (> 30s)"
+          description: "Feature freshness: {{ $value }}s. SLA: 5s."
+
+      - alert: FeatureCriticallyStale
+        expr: featurestore_feature_freshness_seconds > 300
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Feature {{ $labels.feature_name }} critically stale (> 5min)"
+
+  - name: featurestore.redis
+    interval: 15s
+    rules:
+      - alert: RedisHighLatency
+        expr: histogram_quantile(0.99, rate(featurestore_redis_latency_seconds_bucket[5m])) > 0.005
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis p99 latency > 5ms"
+
+      - alert: CircuitBreakerOpen
+        expr: featurestore_circuit_breaker_state{name="redis"} == 2
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis circuit breaker is OPEN"
+          description: "Too many Redis failures. Feature serving degraded."
+
+  - name: featurestore.kafka
+    interval: 30s
+    rules:
+      - alert: KafkaConsumerLag
+        expr: kafka_consumer_group_lag > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer lag > 1000 messages"
+
+  - name: featurestore.flink
+    interval: 30s
+    rules:
+      - alert: FlinkCheckpointFailure
+        expr: increase(flink_jobmanager_job_numberOfFailedCheckpoints[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Flink checkpoint failure detected"
+          description: "Exactly-once guarantees may be compromised."
