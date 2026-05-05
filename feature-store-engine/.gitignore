@@ -1,0 +1,46 @@
+# ── Secrets & Environment ─────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Go ────────────────────────────────────────────────────────────
+bin/
+*.exe
+*.test
+*.out
+vendor/
+go.work
+go.work.sum
+
+# ── Java / Maven ──────────────────────────────────────────────────
+target/
+*.class
+*.jar
+*.war
+.mvn/timing.properties
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# ── Logs & Data ───────────────────────────────────────────────────
+*.log
+*.parquet
+*.avro
+train.csv
+training.csv
+
+# ── OS / IDE ──────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# ── Flink artifacts ───────────────────────────────────────────────
+checkpoints/
+savepoints/
