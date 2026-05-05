@@ -140,6 +140,19 @@ flink-restore:
 		-d '{"drain": false, "targetDirectory": "s3://flink-savepoints/savepoints"}' || true
 	@echo "Savepoint created. Restart with flink-run."
 
+## flink-backfill: Run batch backfill for a date range (no stream downtime)
+## Usage: make flink-backfill feature_view=user_engagement start=2024-01-01 end=2024-01-07
+flink-backfill:
+	@echo "⏪ Running batch backfill for $(feature_view) [$(start) → $(end)]..."
+	@cd backfill && mvn clean package -DskipTests -q
+	@curl -sf -X POST $(FLINK_REST)/jars/upload -H "Expect:" \
+		-F "jarfile=@backfill/target/backfill-1.0.0.jar"
+	@curl -sf -X POST $(FLINK_REST)/jars/$$(curl -sf $(FLINK_REST)/jars | python3 -c \
+		"import sys,json; d=json.load(sys.stdin); print(d['files'][0]['id'] if d['files'] else '')")/run \
+		-H "Content-Type: application/json" \
+		-d "{\"programArgs\": \"--feature-view=$(feature_view) --start=$(start) --end=$(end) --minio-endpoint=$(MINIO_ENDPOINT) --redis-cluster=$(REDIS_CLUSTER)\"}"
+	@echo "✅ Backfill job submitted. Monitor at http://localhost:8082"
+
 ## chaos-kill-flink: Kill Flink jobmanager for chaos testing
 chaos-kill-flink:
 	@echo "💥 Killing Flink jobmanager (chaos test)..."
