@@ -1,0 +1,142 @@
+# Feature View: User Engagement Features
+# Defines incremental materialized views computed from Kafka events
+
+feature_view: user_engagement
+version: "1.0.0"
+owner: "ml-platform-team"
+description: "Real-time user engagement features computed from streaming events"
+
+entities:
+  - name: user_id
+    type: string
+    description: "User entity identifier"
+
+source:
+  type: kafka
+  topic: user_events
+  schema_registry: "http://schema-registry:8081"
+  schema: user_events
+  format: avro
+  # Event-time watermark: tolerate 5 seconds of out-of-order events
+  watermark: "event_time - INTERVAL '5' SECOND"
+  bootstrap_servers: "kafka-1:29092,kafka-2:29092,kafka-3:29092"
+  consumer_group: "flink-feature-user-engagement"
+  startup_mode: earliest
+
+features:
+  # ── Tumbling Window: Click count in last 1 hour ──────────────
+  - name: click_count_1h
+    description: "Number of click events in the last 1-hour tumbling window"
+    sql: |
+      SELECT
+        user_id,
+        COUNT(*) AS click_count_1h,
+        TUMBLE_END(event_time, INTERVAL '1' HOUR) AS window_end
+      FROM user_events
+      WHERE event_type = 'click'
+      GROUP BY
+        user_id,
+        TUMBLE(event_time, INTERVAL '1' HOUR)
+    aggregation: tumbling_window
+    window_size: 1h
+    ttl: 24h
+    output_type: int64
+    redis_key_template: "feat:user:{user_id}:click_count_1h"
+
+  # ── Tumbling Window: Purchase count in last 24 hours ─────────
+  - name: purchase_count_24h
+    description: "Number of purchase events in the last 24-hour tumbling window"
+    sql: |
+      SELECT
+        user_id,
+        COUNT(*) AS purchase_count_24h,
+        SUM(CAST(COALESCE(properties['amount'], '0') AS DOUBLE)) AS purchase_amount_24h,
+        TUMBLE_END(event_time, INTERVAL '24' HOUR) AS window_end
+      FROM user_events
+      WHERE event_type = 'purchase'
+      GROUP BY
+        user_id,
+        TUMBLE(event_time, INTERVAL '24' HOUR)
+    aggregation: tumbling_window
+    window_size: 24h
+    ttl: 7d
+    output_type: int64
+
+  # ── Hopping Window: Average session duration (rolling 24h) ───
+  - name: avg_session_duration_24h
+    description: "Average session duration over a 24-hour hopping window (updated hourly)"
+    sql: |
+      SELECT
+        user_id,
+        AVG(CAST(COALESCE(properties['session_duration'], '0') AS DOUBLE)) AS avg_session_duration_24h,
+        COUNT(DISTINCT session_id) AS session_count_24h,
+        HOP_END(event_time, INTERVAL '1' HOUR, INTERVAL '24' HOUR) AS window_end
+      FROM user_events
+      WHERE event_type IN ('login', 'logout', 'view')
+      GROUP BY
+        user_id,
+        HOP(event_time, INTERVAL '1' HOUR, INTERVAL '24' HOUR)
+    aggregation: hopping_window
+    hop_size: 1h
+    window_size: 24h
+    ttl: 7d
+    output_type: double
+
+  # ── Tumbling Window: CTR (click-through rate) per hour ───────
+  - name: ctr_1h
+    description: "Click-through rate in the last 1-hour window"
+    sql: |
+      SELECT
+        user_id,
+        CAST(SUM(CASE WHEN event_type = 'click' THEN 1 ELSE 0 END) AS DOUBLE) /
+          NULLIF(SUM(CASE WHEN event_type = 'view' THEN 1 ELSE 0 END), 0) AS ctr_1h,
+        TUMBLE_END(event_time, INTERVAL '1' HOUR) AS window_end
+      FROM user_events
+      WHERE event_type IN ('click', 'view')
+      GROUP BY
+        user_id,
+        TUMBLE(event_time, INTERVAL '1' HOUR)
+    aggregation: tumbling_window
+    window_size: 1h
+    ttl: 24h
+    output_type: double
+
+  # ── Global Aggregation: Total lifetime clicks ─────────────────
+  - name: total_clicks_lifetime
+    description: "Running total of all clicks (global aggregation with retraction)"
+    sql: |
+      SELECT
+        user_id,
+        COUNT(*) AS total_clicks_lifetime
+      FROM user_events
+      WHERE event_type = 'click'
+      GROUP BY user_id
+    aggregation: global
+    ttl: 90d
+    output_type: int64
+
+sinks:
+  online:
+    type: redis
+    cluster: true
+    nodes:
+      - "redis-node-1:6379"
+      - "redis-node-2:6379"
+      - "redis-node-3:6379"
+    key_prefix: "feat:user"
+    serialization: protobuf
+  offline:
+    type: parquet
+    bucket: "feature-offline-store"
+    prefix: "user_engagement"
+    partition_by: ["feature_name", "date"]
+    compression: snappy
+
+checkpointing:
+  interval_ms: 60000
+  mode: EXACTLY_ONCE
+  storage: "s3://flink-checkpoints/checkpoints/user_engagement"
+
+monitoring:
+  freshness_sla_seconds: 5
+  alert_on_lag_messages: 1000
