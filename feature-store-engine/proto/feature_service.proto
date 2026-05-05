@@ -1,0 +1,205 @@
+syntax = "proto3";
+
+package featurestore;
+
+option go_package = "github.com/featurestore/api-server/internal/gen;gen";
+
+import "google/protobuf/timestamp.proto";
+
+// ─────────────────────────────────────────────────────────────────
+// Feature Service – gRPC API Definition
+// StreamFeature Real-Time Feature Store Engine
+// ─────────────────────────────────────────────────────────────────
+
+service FeatureService {
+  // Online feature retrieval: low-latency lookup from Redis
+  rpc GetOnlineFeatures(GetOnlineFeaturesRequest) returns (GetOnlineFeaturesResponse);
+
+  // Historical feature retrieval: point-in-time correct features from Parquet
+  rpc GetHistoricalFeatures(GetHistoricalFeaturesRequest) returns (stream FeatureRow);
+
+  // Real-time feature streaming: subscribe to feature updates
+  rpc StreamFeatures(StreamFeaturesRequest) returns (stream FeatureRow);
+
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Entities
+// ─────────────────────────────────────────────────────────────────
+
+message Entity {
+  string entity_type = 1;  // e.g. "user", "product", "session"
+  string entity_id   = 2;  // e.g. "user_123"
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Feature Values
+// ─────────────────────────────────────────────────────────────────
+
+message FeatureValue {
+  string feature_name = 1;
+  oneof value {
+    double double_val   = 2;
+    int64  int_val      = 3;
+    string string_val   = 4;
+    bool   bool_val     = 5;
+    bytes  bytes_val    = 6;
+    ListValue list_val  = 7;
+  }
+  google.protobuf.Timestamp event_time     = 8;
+  google.protobuf.Timestamp ingestion_time = 9;
+  FeatureStatus status = 10;
+}
+
+message ListValue {
+  repeated double values = 1;
+}
+
+enum FeatureStatus {
+  FEATURE_STATUS_UNSPECIFIED = 0;
+  FEATURE_STATUS_PRESENT     = 1;
+  FEATURE_STATUS_NULL        = 2;    // Feature exists but has null value
+  FEATURE_STATUS_NOT_FOUND   = 3;    // Feature not found for this entity
+  FEATURE_STATUS_OUTSIDE_TTL = 4;   // Feature exists but beyond TTL
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Online Feature Requests / Responses
+// ─────────────────────────────────────────────────────────────────
+
+message GetOnlineFeaturesRequest {
+  repeated string feature_names = 1;  // e.g. ["click_count_1h", "avg_session_duration_24h"]
+  repeated Entity entities       = 2;
+  bool            full_feature_names = 3;  // Include feature view name in response
+}
+
+message GetOnlineFeaturesResponse {
+  repeated EntityFeatures results = 1;
+  ResponseMetadata metadata       = 2;
+}
+
+message EntityFeatures {
+  Entity entity                     = 1;
+  repeated FeatureValue features    = 2;
+}
+
+message ResponseMetadata {
+  int64  latency_us     = 1;  // Serving latency in microseconds
+  string feature_view   = 2;
+  int32  cache_hits     = 3;
+  int32  cache_misses   = 4;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Historical Feature Requests (PIT-correct)
+// ─────────────────────────────────────────────────────────────────
+
+message GetHistoricalFeaturesRequest {
+  repeated string feature_names      = 1;
+  repeated EntityTimestamp entity_timestamps = 2;
+  OutputFormat output_format         = 3;
+}
+
+message EntityTimestamp {
+  Entity                    entity    = 1;
+  google.protobuf.Timestamp timestamp = 2;  // PIT timestamp – get features as-of this time
+}
+
+enum OutputFormat {
+  OUTPUT_FORMAT_ROWS    = 0;
+  OUTPUT_FORMAT_COLUMNS = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Feature Streaming
+// ─────────────────────────────────────────────────────────────────
+
+message StreamFeaturesRequest {
+  repeated string feature_names = 1;
+  repeated Entity entities       = 2;
+  int64           window_size_ms = 3;  // Emit updates every N ms; 0 = every update
+}
+
+message FeatureRow {
+  Entity                    entity    = 1;
+  repeated FeatureValue     features  = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  string                    source    = 4;  // "online" | "offline" | "stream"
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Health Check
+// ─────────────────────────────────────────────────────────────────
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool    healthy          = 1;
+  string  status           = 2;
+  map<string, string> components = 3;  // Component health map
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Registry Service – Feature Definition Management
+// ─────────────────────────────────────────────────────────────────
+
+service RegistryService {
+  rpc RegisterFeatureView(RegisterFeatureViewRequest) returns (RegisterFeatureViewResponse);
+  rpc GetFeatureView(GetFeatureViewRequest) returns (FeatureView);
+  rpc ListFeatureViews(ListFeatureViewsRequest) returns (ListFeatureViewsResponse);
+  rpc GetFeatureLineage(GetFeatureLineageRequest) returns (FeatureLineage);
+}
+
+message FeatureView {
+  string id             = 1;
+  string name           = 2;
+  string sql_definition = 3;
+  repeated string entities = 4;
+  int32  ttl_seconds    = 5;
+  string owner          = 6;
+  google.protobuf.Timestamp created_at = 7;
+  map<string, string> tags = 8;
+  string version        = 9;
+}
+
+message RegisterFeatureViewRequest {
+  FeatureView feature_view = 1;
+}
+
+message RegisterFeatureViewResponse {
+  string id      = 1;
+  string version = 2;
+}
+
+message GetFeatureViewRequest {
+  string name = 1;
+}
+
+message ListFeatureViewsRequest {
+  string entity_filter = 1;  // Optional: filter by entity type
+  int32  page_size     = 2;
+  string page_token    = 3;
+}
+
+message ListFeatureViewsResponse {
+  repeated FeatureView feature_views = 1;
+  string next_page_token             = 2;
+}
+
+message GetFeatureLineageRequest {
+  string feature_name = 1;
+}
+
+message FeatureLineage {
+  string feature_name           = 1;
+  repeated LineageNode upstream = 2;
+}
+
+message LineageNode {
+  string node_type         = 1;  // "kafka_topic", "flink_job", "redis", "parquet"
+  string node_id           = 2;
+  string transformation    = 3;
+  repeated string children = 4;
+}

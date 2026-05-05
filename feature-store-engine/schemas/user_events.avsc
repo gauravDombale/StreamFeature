@@ -1,0 +1,67 @@
+{
+  "type": "record",
+  "name": "UserEvent",
+  "namespace": "com.featurestore.events",
+  "doc": "User interaction event schema for the feature store engine",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "Unique event identifier (UUID)"
+    },
+    {
+      "name": "user_id",
+      "type": "string",
+      "doc": "User entity identifier"
+    },
+    {
+      "name": "session_id",
+      "type": "string",
+      "doc": "Session identifier for grouping events"
+    },
+    {
+      "name": "event_type",
+      "type": {
+        "type": "enum",
+        "name": "EventType",
+        "symbols": ["click", "view", "purchase", "search", "add_to_cart", "checkout", "login", "logout", "share"]
+      },
+      "doc": "Type of user interaction"
+    },
+    {
+      "name": "event_time",
+      "type": { "type": "long", "logicalType": "timestamp-millis" },
+      "doc": "Event timestamp in milliseconds (event time, not processing time)"
+    },
+    {
+      "name": "page_url",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "URL where the event occurred"
+    },
+    {
+      "name": "item_id",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Product or item ID (for purchase/cart events)"
+    },
+    {
+      "name": "properties",
+      "type": {
+        "type": "map",
+        "values": "double"
+      },
+      "doc": "Flexible numeric properties (price, duration, quantity, etc.)",
+      "default": {}
+    },
+    {
+      "name": "metadata",
+      "type": {
+        "type": "map",
+        "values": "string"
+      },
+      "doc": "String metadata (device, country, referrer, etc.)",
+      "default": {}
+    }
+  ]
+}
