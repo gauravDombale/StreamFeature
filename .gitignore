@@ -1,87 +1,45 @@
-# ── Secrets & Environment ─────────────────────────────────────────
-.env
-.env.local
-.env.*.local
-*.secret
-secrets/
-
-# ── Agent spec file (not for public repo) ────────────────────────
+# Agent spec file (internal — not for public repo)
 Agent.md
 
+# ── Secrets & Environment ─────────────────────────────────────────
+feature-store-engine/.env
+feature-store-engine/.env.local
+.env
+.env.local
+
 # ── Go ────────────────────────────────────────────────────────────
-# Binaries
-*/bin/
+bin/
 *.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
 *.test
-
-# Output of the go coverage tool
 *.out
-coverage.html
-
-# Go workspace file
+vendor/
 go.work
 go.work.sum
 
-# Dependency directories
-vendor/
-
 # ── Java / Maven ──────────────────────────────────────────────────
-target/
+**/target/
 *.class
 *.jar
 *.war
-*.ear
-*.nar
-.mvn/timing.properties
-!**/src/main/**/target/
-!**/src/test/**/target/
 
-# ── IDE & OS ──────────────────────────────────────────────────────
-.idea/
-*.iml
-.vscode/
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-*~
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
-# ── Docker ────────────────────────────────────────────────────────
-# Keep docker-compose.yml but ignore override files with secrets
-docker-compose.override.yml
-docker-compose.prod.yml
-
-# ── Logs ──────────────────────────────────────────────────────────
+# ── Logs & Data ───────────────────────────────────────────────────
 *.log
-logs/
-
-# ── Data & Artifacts ──────────────────────────────────────────────
 *.parquet
 *.avro
 train.csv
-train.parquet
-training.parquet
-__pycache__/
-*.py[cod]
-*$py.class
-*.pyo
-.pytest_cache/
-.python-version
-
-# ── MinIO / S3 local data ─────────────────────────────────────────
-data/
-minio-data/
-
-# ── Flink ─────────────────────────────────────────────────────────
-flink-jobs/target/
+training.csv
 checkpoints/
 savepoints/
 
-# ── Protobuf (keep generated files, they're needed for build) ─────
-# api-server/internal/gen/ is intentionally committed
+# ── OS / IDE ──────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
