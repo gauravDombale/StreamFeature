@@ -56,8 +56,7 @@ logs:
 ## health-check: Verify all services are healthy
 health-check:
 	@echo "🔍 Health Check..."
-	@echo -n "  Kafka-1:         "; curl -s --max-time 5 http://localhost:9092 > /dev/null 2>&1 && echo "✅" || echo "❌ (checking broker)"; \
-	  docker exec kafka-1 kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1 && echo "  Kafka-1:         ✅" || echo "  Kafka-1:         ❌"
+	@echo -n "  Kafka-1:         "; docker exec kafka-1 kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1 && echo "✅" || echo "❌"
 	@echo -n "  Schema Registry: "; curl -sf http://localhost:8081/subjects > /dev/null && echo "✅" || echo "❌"
 	@echo -n "  Redis Cluster:   "; docker exec redis-node-1 redis-cli cluster info 2>/dev/null | grep -q "cluster_state:ok" && echo "✅" || echo "❌"
 	@echo -n "  PostgreSQL:      "; docker exec featurestore-postgres pg_isready -U featurestore > /dev/null 2>&1 && echo "✅" || echo "❌"
@@ -67,6 +66,7 @@ health-check:
 	@echo -n "  Grafana:         "; curl -sf http://localhost:3000/api/health > /dev/null && echo "✅" || echo "❌"
 	@echo -n "  Jaeger:          "; curl -sf http://localhost:16686/ > /dev/null && echo "✅" || echo "❌"
 	@echo "✅ Health check complete."
+
 
 # ────────────────────────────────────────────────────────────
 # PROTOBUF CODE GENERATION
