@@ -1,34 +1,34 @@
 package com.featurestore.jobs;
 
-import com.featurestore.state.FeatureStateTTL;
-import com.featurestore.watermark.EventTimeWatermarkStrategy;
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.restartstrategy.RestartStrategies;
 import org.apache.flink.api.common.time.Time;
-import org.apache.flink.connector.kafka.source.KafkaSource;
-import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
 import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
 import org.apache.flink.streaming.api.CheckpointingMode;
-import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.EnvironmentSettings;
-import org.apache.flink.table.api.Table;
-import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.Map;
 
 /**
  * FeatureJobRunner – Entry point for all Flink feature computation jobs.
  *
  * Parses a feature definition YAML, generates Flink SQL statements,
  * and executes the streaming job with:
- *   - Event-time processing with watermarking
- *   - RocksDB state backend with incremental checkpoints
+ *   - Event-time processing with watermarking (5s tolerance)
+ *   - RocksDB state backend with incremental checkpoints to MinIO
  *   - Exactly-once semantics via two-phase commit
  *   - Dual output: Redis (online) + Parquet/MinIO (offline)
+ *
+ * Usage:
+ *   java -jar flink-jobs.jar \
+ *     --feature-view user_engagement \
+ *     --kafka-brokers kafka-1:29092 \
+ *     --schema-registry http://schema-registry:8081 \
+ *     --redis-cluster redis-node-1:6379 \
+ *     --minio-endpoint http://minio:9000 \
+ *     --checkpoint-dir s3a://flink-checkpoints/checkpoints
  */
 public class FeatureJobRunner {
 
@@ -39,21 +39,21 @@ public class FeatureJobRunner {
         JobConfig config = JobConfig.fromArgs(args);
         LOG.info("Starting feature job for view: {}", config.getFeatureView());
 
-        // ── Load feature definition ──────────────────────────────
+        // ── Load feature definition from YAML ───────────────────
         FeatureViewDefinition featureView = FeatureViewDefinition.loadFromFile(
             "features/" + config.getFeatureView() + ".yaml"
         );
         LOG.info("Loaded feature view: {} with {} features",
             featureView.getName(), featureView.getFeatures().size());
 
-        // ── Set up Flink execution environment ───────────────────
+        // ── Set up Flink streaming execution environment ─────────
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-
-        // Parallelism
         env.setParallelism(config.getParallelism());
 
-        // ── RocksDB State Backend ────────────────────────────────
-        EmbeddedRocksDBStateBackend rocksDB = new EmbeddedRocksDBStateBackend(true); // incremental
+        // ── RocksDB State Backend (incremental checkpoints) ──────
+        // incremental=true: only uploads changed SST files to S3,
+        // dramatically reducing checkpoint size and time.
+        EmbeddedRocksDBStateBackend rocksDB = new EmbeddedRocksDBStateBackend(true);
         env.setStateBackend(rocksDB);
 
         // ── Checkpointing: Exactly-Once ──────────────────────────
@@ -62,12 +62,17 @@ public class FeatureJobRunner {
         env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30_000L);
         env.getCheckpointConfig().setCheckpointTimeout(120_000L);
         env.getCheckpointConfig().setMaxConcurrentCheckpoints(1);
-        env.getCheckpointConfig().setExternalizedCheckpointRetention(
-            org.apache.flink.streaming.api.environment.CheckpointConfig
-                .ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION
+
+        // RETAIN_ON_CANCELLATION: keep checkpoint in S3 when job is cancelled
+        // so it can be restored later. Renamed from ExternalizedCheckpointRetention
+        // to ExternalizedCheckpointCleanup in Flink 1.14+
+        env.getCheckpointConfig().setExternalizedCheckpointCleanup(
+            CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION
         );
 
         // ── Restart Strategy ─────────────────────────────────────
+        // 10 attempts with 10s delay between each — handles transient
+        // network issues without losing state
         env.setRestartStrategy(
             RestartStrategies.fixedDelayRestart(10, Time.seconds(10))
         );
@@ -78,8 +83,11 @@ public class FeatureJobRunner {
             .build();
         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, settings);
 
-        // Configure Table API defaults
+        // UTC timezone prevents DST-related window boundary bugs
         tableEnv.getConfig().set("table.local-time-zone", "UTC");
+
+        // State TTL: automatically clean up window state after max feature TTL
+        // prevents RocksDB from growing unbounded for long-running jobs
         tableEnv.getConfig().set(
             "table.exec.state.ttl",
             String.valueOf(featureView.getMaxTtlMs())
@@ -101,6 +109,8 @@ public class FeatureJobRunner {
         tableEnv.executeSql(createParquetSink);
 
         // ── Execute Feature Queries ──────────────────────────────
+        // Each feature runs as a separate streaming INSERT, all within
+        // the same Flink job graph sharing the same Kafka consumer group
         for (FeatureDefinition feature : featureView.getFeatures()) {
             LOG.info("Deploying feature: {} (aggregation: {})",
                 feature.getName(), feature.getAggregation());
@@ -108,30 +118,26 @@ public class FeatureJobRunner {
             String featureSQL = buildFeatureInsertSQL(feature, featureView);
             LOG.info("Feature SQL:\n{}", featureSQL);
 
-            // Execute asynchronously (returns immediately, job runs in background)
+            // executeSql for INSERT is async: registers the pipeline,
+            // actual execution happens when env.execute() is called
             tableEnv.executeSql(featureSQL);
         }
 
-        LOG.info("All feature jobs submitted for view: {}", featureView.getName());
-        // Job runs until manually cancelled or fails
+        LOG.info("All {} feature pipelines registered for view: {}",
+            featureView.getFeatures().size(), featureView.getName());
+        // Flink job runs until manually cancelled or fails
     }
+
+    // ── DDL Builders ──────────────────────────────────────────────
 
     /**
      * Build Kafka source DDL with event-time watermarking.
      *
-     * Example output:
-     * CREATE TABLE user_events (
-     *   event_id STRING,
-     *   user_id STRING,
-     *   event_type STRING,
-     *   event_time TIMESTAMP_LTZ(3),
-     *   properties MAP<STRING, DOUBLE>,
-     *   WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND
-     * ) WITH (
-     *   'connector' = 'kafka',
-     *   'topic' = 'user_events',
-     *   ...
-     * )
+     * The watermark expression comes from the feature view YAML:
+     *   watermark: "event_time - INTERVAL '5' SECOND"
+     *
+     * This allows events up to 5 seconds late to be included in the
+     * correct window. Events later than this go to a side output.
      */
     private static String buildKafkaSourceDDL(FeatureViewDefinition view, JobConfig config) {
         String topic = view.getSource().getTopic();
@@ -150,30 +156,36 @@ public class FeatureJobRunner {
                 metadata        MAP<STRING, STRING>,
                 WATERMARK FOR event_time AS %s
             ) WITH (
-                'connector'                         = 'kafka',
-                'topic'                             = '%s',
-                'properties.bootstrap.servers'      = '%s',
-                'properties.group.id'               = 'flink-feature-%s',
-                'scan.startup.mode'                 = 'earliest-offset',
-                'format'                            = 'avro-confluent',
-                'avro-confluent.schema-registry.url'= '%s',
-                'properties.isolation.level'        = 'read_committed',
-                'properties.enable.auto.commit'     = 'false',
-                'properties.auto.offset.reset'      = 'earliest'
+                'connector'                          = 'kafka',
+                'topic'                              = '%s',
+                'properties.bootstrap.servers'       = '%s',
+                'properties.group.id'                = 'flink-feature-%s',
+                'scan.startup.mode'                  = 'earliest-offset',
+                'format'                             = 'avro-confluent',
+                'avro-confluent.schema-registry.url' = '%s',
+                'properties.isolation.level'         = 'read_committed',
+                'properties.enable.auto.commit'      = 'false',
+                'properties.auto.offset.reset'       = 'earliest'
             )
             """,
-            topic,          // table name
-            watermark,      // watermark expression
-            topic,          // kafka topic
+            topic,                      // table name = topic name
+            watermark,                  // watermark expression from YAML
+            topic,                      // kafka topic
             config.getKafkaBrokers(),
-            view.getName(),
+            view.getName(),             // consumer group per feature view
             config.getSchemaRegistry()
         );
     }
 
     /**
-     * Build Redis online feature sink DDL using Custom Sink function.
-     * Redis stores features as: HSET feat:user:{user_id} {feature_name} {value}
+     * Build Redis online feature sink DDL.
+     *
+     * Uses a custom connector (redis-featurestore) that writes:
+     *   HSET feat:user:{entity_id} {feature_name} {binary_float64}
+     *   EXPIRE feat:user:{entity_id} {ttl_seconds}
+     *
+     * The binary encoding matches the Go API server's decoding,
+     * ensuring zero-copy reads at serving time.
      */
     private static String buildRedisSinkDDL(FeatureViewDefinition view, JobConfig config) {
         return String.format("""
@@ -184,9 +196,9 @@ public class FeatureJobRunner {
                 event_time     TIMESTAMP_LTZ(3),
                 window_end     TIMESTAMP_LTZ(3)
             ) WITH (
-                'connector'     = 'redis-featurestore',
-                'redis.cluster' = '%s',
-                'redis.key-prefix' = 'feat:user',
+                'connector'         = 'redis-featurestore',
+                'redis.cluster'     = '%s',
+                'redis.key-prefix'  = 'feat:user',
                 'redis.ttl-seconds' = '86400'
             )
             """,
@@ -196,9 +208,16 @@ public class FeatureJobRunner {
 
     /**
      * Build Parquet offline sink DDL for MinIO (S3-compatible).
-     * Partitioned by feature_name and date for efficient PIT queries.
+     *
+     * Partitioned by (feature_name, dt) enables efficient PIT queries:
+     *   - Partition pruning on dt eliminates most Parquet files
+     *   - Reading only the relevant feature_name partition reduces scan size
+     *
+     * Rolling policy: new file every 1 hour ensures reasonable file sizes.
      */
     private static String buildParquetSinkDDL(FeatureViewDefinition view, JobConfig config) {
+        String minioEndpoint = config.getMinioEndpoint();
+
         return String.format("""
             CREATE TABLE IF NOT EXISTS parquet_offline_sink (
                 entity_id      STRING,
@@ -210,39 +229,44 @@ public class FeatureJobRunner {
                 dt             STRING
             ) PARTITIONED BY (feature_name, dt)
             WITH (
-                'connector'          = 'filesystem',
-                'path'               = 's3a://feature-offline-store/%s',
-                'format'             = 'parquet',
-                'parquet.compression'= 'SNAPPY',
-                'sink.rolling-policy.rollover-interval' = '1 h',
-                'sink.rolling-policy.check-interval'    = '10 min'
+                'connector'                              = 'filesystem',
+                'path'                                   = 's3a://feature-offline-store/%s',
+                'format'                                 = 'parquet',
+                'parquet.compression'                    = 'SNAPPY',
+                'sink.rolling-policy.rollover-interval'  = '1 h',
+                'sink.rolling-policy.check-interval'     = '10 min',
+                's3.endpoint'                            = '%s',
+                's3.access-key'                          = 'minioadmin',
+                's3.secret-key'                          = 'minioadmin123',
+                's3.path.style.access'                   = 'true'
             )
             """,
-            view.getName()
+            view.getName(),
+            minioEndpoint
         );
     }
 
     /**
-     * Build INSERT SQL that reads from Kafka source, applies the feature SQL,
-     * and writes to both Redis and Parquet sinks.
+     * Build INSERT SQL that materialises one feature into the online sink.
+     *
+     * The feature's own SQL (from YAML) computes the aggregation.
+     * We wrap it to standardise the output schema for the Redis sink.
      */
     private static String buildFeatureInsertSQL(FeatureDefinition feature, FeatureViewDefinition view) {
         String sourceSql = feature.getSql().trim();
 
-        // Wrap the feature SQL into an INSERT INTO redis_online_sink statement
-        // We use a STATEMENT SET to write to multiple sinks atomically
         return String.format("""
             INSERT INTO redis_online_sink
             SELECT
-                user_id                         AS entity_id,
-                '%s'                            AS feature_name,
-                CAST(%s AS DOUBLE)              AS feature_value,
+                user_id                     AS entity_id,
+                '%s'                        AS feature_name,
+                CAST(%s AS DOUBLE)          AS feature_value,
                 event_time,
                 window_end
             FROM (%s)
             """,
             feature.getName(),
-            feature.getName(),  // the column alias from the feature SQL
+            feature.getName(),   // column alias from the feature SQL
             sourceSql
         );
     }
